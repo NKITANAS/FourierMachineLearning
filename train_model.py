@@ -145,54 +145,40 @@ class FourierDataset(dataset.Dataset):
         return self.inputs[idx], self.out[idx]
 
 
-# Create the data
-Xtrain, Ytrain, Ltrain, Ctrain, C_xytrain = generate_data(     samples,      scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, phase_angle, Abase)
-Xtest,  Ytest,  Ltest,  Ctest,  C_xytest  = generate_data(test_samples, test_scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, phase_angle, Abase)
 
-training_data = FourierDataset(Xtrain, Ytrain, Ltrain, Ctrain, C_xytrain)
-test_data     = FourierDataset(Xtest,  Ytest,  Ltest,  Ctest,  C_xytest)
 
-training_loader = torch.utils.data.DataLoader(training_data, batch_size=batch_size, shuffle=True)
-testing_loader  = torch.utils.data.DataLoader(test_data,     batch_size=batch_size, shuffle=True)
+# Train the Model
 
-# Train the Model #
 
-# Define Model
 class FourierModel(torch.nn.Module):
-
     def __init__(self):
         super().__init__()
         # Create Neural Network
         # NOTE: SeLU can be replaced with GeLU.
         self.network = torch.nn.Sequential(
-
             torch.nn.Linear(n_inputs, n_neurons),  # Input
             torch.nn.SELU(),
 
-            torch.nn.Linear(n_neurons, n_neurons), # Hidden
+            torch.nn.Linear(n_neurons, n_neurons),  # Hidden
             torch.nn.SELU(),
 
-            torch.nn.Linear(n_neurons, n_neurons), # Hidden
+            torch.nn.Linear(n_neurons, n_neurons),  # Hidden
             torch.nn.SELU(),
 
-            torch.nn.Linear(n_neurons, n_neurons), # Hidden
+            torch.nn.Linear(n_neurons, n_neurons),  # Hidden
             torch.nn.SELU(),
 
-            torch.nn.Linear(n_neurons, n_outputs), # Output
-            torch.nn.Sigmoid() # make the output range only from 0 to 1
-
+            torch.nn.Linear(n_neurons, n_outputs),  # Output
+            torch.nn.Sigmoid()  # make the output range only from 0 to 1
         )
 
     def forward(self, x):
         return self.network(x)
 
-model = FourierModel()
-loss_function = torch.nn.CrossEntropyLoss()
-optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
 
-def train_one_epoch(epoch_index):
-    running_loss = 0
-    last_loss = 0
+def train_one_epoch(training_loader, model, optimizer, loss_function):
+    running_loss = 0.0
+    last_loss = 0.0
 
     # index and do some intra-epoch reporting
     for i, data in enumerate(training_loader):
@@ -215,47 +201,66 @@ def train_one_epoch(epoch_index):
         # Gather data and report
         running_loss += loss.item()
         if i % 1000 == 999:
-            last_loss = running_loss / 1000 # loss per batch
+            last_loss = running_loss / 1000.0  # loss per batch
             print(f'  batch {i + 1} loss: {last_loss}')
-            running_loss = 0.
+            running_loss = 0.0
 
     return last_loss
 
 
-epoch_number = 0  
-best_vloss = 1_000_000.
+def main():
+    # Create the data
+    Xtrain, Ytrain, Ltrain, Ctrain, C_xytrain = generate_data(
+        samples, scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, phase_angle, Abase)
+    Xtest, Ytest, Ltest, Ctest, C_xytest = generate_data(
+        test_samples, test_scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, phase_angle, Abase)
 
-for epoch in range(epochs):
-    print(f'EPOCH {epoch_number + 1}:')
+    training_data = FourierDataset(Xtrain, Ytrain, Ltrain, Ctrain, C_xytrain)
+    test_data = FourierDataset(Xtest, Ytest, Ltest, Ctest, C_xytest)
 
-    # Make sure gradient tracking is on, and do a pass over the data
-    model.train(True)
-    avg_loss = train_one_epoch(epoch_number)
+    training_loader = torch.utils.data.DataLoader(training_data, batch_size=batch_size, shuffle=True)
+    testing_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size, shuffle=True)
+
+    # Build model, loss, optimizer
+    model = FourierModel()
+    loss_function = torch.nn.BCELoss()
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+
+    epoch_number = 0
+    best_vloss = float('inf')
+
+    for epoch in range(epochs):
+        print(f'EPOCH {epoch_number + 1}:')
+
+        # Make sure gradient tracking is on, and do a pass over the data
+        model.train()
+        avg_loss = train_one_epoch(training_loader, model, optimizer, loss_function)
+
+        running_vloss = 0.0
+        # Set the model to evaluation mode, disabling dropout and using population
+        # statistics for batch normalization.
+        model.eval()
+
+        # Disable gradient computation and reduce memory consumption.
+        with torch.no_grad():
+            for i, vdata in enumerate(testing_loader):
+                vinputs, vlabels = vdata
+                voutputs = model(vinputs)
+                vloss = loss_function(voutputs, vlabels)
+                running_vloss += vloss.item()
+
+        avg_vloss = running_vloss / (i + 1)
+        print(f'LOSS train {avg_loss} valid {avg_vloss}')
+
+        # Track best performance, and save the model's state
+        if avg_vloss < best_vloss:
+            best_vloss = avg_vloss
+            model_path = f'model_1_{epoch_number}.pt'
+            torch.save(model.state_dict(), model_path)
+
+        epoch_number += 1
 
 
-    running_vloss = 0.0
-    # Set the model to evaluation mode, disabling dropout and using population
-    # statistics for batch normalization.
-    model.eval()
-
-    # Disable gradient computation and reduce memory consumption.
-    with torch.no_grad():
-        for i, vdata in enumerate(testing_loader):
-            vinputs, vlabels = vdata
-            voutputs = model(vinputs)
-            vloss = loss_function(voutputs, vlabels)
-            running_vloss += vloss
-
-    avg_vloss = running_vloss / (i + 1)
-    print(f'LOSS train {avg_loss} valid {avg_vloss}')
-
-    # Log the running loss averaged per batch
-    # for both training and validation
-
-    # Track best performance, and save the model's state
-    if avg_vloss < best_vloss:
-        best_vloss = avg_vloss
-        model_path = f'model_1_{epoch_number}'
-        torch.save(model.state_dict(), model_path)
-
-    epoch_number += 1
+if __name__ == '__main__':
+    main()
+    
