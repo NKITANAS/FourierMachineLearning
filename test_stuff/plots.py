@@ -14,14 +14,15 @@ import matplotlib.pyplot as plt
 # depending on the training script's module path.
 # =====================================================================================
  
-n_inputs = 4
+n_inputs = 5
 n_outputs = 1
 n_neurons = 35
- 
+
 # Data-generation hyperparameters (used for ground-truth comparison fields)
 m, n = 12, 12
 beta = 1.67
 Abase = 0.7
+phase_seed = 42  # must match phase_seed in train_model_less_data.py
  
  
 class FourierModel(torch.nn.Module):
@@ -89,42 +90,43 @@ def load_model(model_path, device='cpu'):
 # Model-driven field generation
 # =====================================================================================
  
-def generate_grid_inputs(L, C_threshold, resolution=200):
+def generate_grid_inputs(L, C_threshold, phase_norm, resolution=200):
     """
     Build a (resolution x resolution) grid of normalized (x, y) coordinates in [0, 1]
-    and stack them with the scene's L and C_threshold to form model-ready inputs.
- 
+    and stack them with the scene's L, C_threshold, and phase to form model-ready inputs.
+
     Returns:
-        inputs_tensor: (resolution*resolution, 4) float32 tensor, ready for the model
+        inputs_tensor: (resolution*resolution, 5) float32 tensor, ready for the model
         X_norm, Y_norm: (resolution, resolution) meshgrid arrays (normalized coords),
                          kept around so outputs can be reshaped/plotted later
     """
     lin = np.linspace(0.0, 1.0, resolution, dtype=np.float32)
     X_norm, Y_norm = np.meshgrid(lin, lin)
- 
+
     flat_x = X_norm.ravel()
     flat_y = Y_norm.ravel()
     flat_L = np.full_like(flat_x, L, dtype=np.float32)
     flat_C = np.full_like(flat_x, C_threshold, dtype=np.float32)
- 
-    inputs = np.stack([flat_x, flat_y, flat_L, flat_C], axis=1)
+    flat_Phase = np.full_like(flat_x, phase_norm, dtype=np.float32)
+
+    inputs = np.stack([flat_x, flat_y, flat_L, flat_C, flat_Phase], axis=1)
     inputs_tensor = torch.tensor(inputs, dtype=torch.float32)
- 
+
     return inputs_tensor, X_norm, Y_norm
  
  
-def generate_cloud_field(model, L, C_threshold, resolution=200, device='cpu', batch_size=8192):
+def generate_cloud_field(model, L, C_threshold, phase_norm, resolution=200, device='cpu', batch_size=8192):
     """
     Use a trained model to predict cloud density over a full (resolution x resolution)
-    grid for a given scene size L and condensation threshold C_threshold.
- 
+    grid for a given scene size L, condensation threshold C_threshold, and phase.
+
     Returns a dict with:
         'X_norm', 'Y_norm' : (resolution, resolution) normalized coordinate grids
         'X', 'Y'            : (resolution, resolution) physical coordinate grids (x*L, y*L)
         'cloud_density'     : (resolution, resolution) predicted density field in [0, 1]
         'L', 'C_threshold'  : the scene parameters used
     """
-    inputs_tensor, X_norm, Y_norm = generate_grid_inputs(L, C_threshold, resolution)
+    inputs_tensor, X_norm, Y_norm = generate_grid_inputs(L, C_threshold, phase_norm, resolution)
  
     model.eval()
     preds = []
@@ -152,34 +154,36 @@ def generate_cloud_field(model, L, C_threshold, resolution=200, device='cpu', ba
 # a regular grid instead of random samples, for direct visual/quantitative comparison)
 # =====================================================================================
  
-def generate_ground_truth_field(L, C_threshold, resolution=200, m=m, n=n, beta=beta,
-                                 Abase=Abase, seed=None):
+def generate_ground_truth_field(L, C_threshold, scene_phase, resolution=200, m=m, n=n, beta=beta,
+                                 Abase=Abase, phase_seed=phase_seed):
     """
     Recompute the analytic Fourier cloud field (same generative process used to build
-    the training data) over a (resolution x resolution) grid for a given L and
-    C_threshold. Useful as a ground-truth counterpart to generate_cloud_field's output.
- 
+    the training data) over a (resolution x resolution) grid for a given L, C_threshold,
+    and scene_phase. Useful as a ground-truth counterpart to generate_cloud_field's output.
+
     Returns a dict with the same shape/keys as generate_cloud_field (minus 'L'/'C_threshold'
     already matching the requested scene), so the two can be compared or plotted side by side.
     """
-    rng = np.random.default_rng(seed)
- 
     lin = np.linspace(0.0, 1.0, resolution, dtype=np.float64)
     X_norm, Y_norm = np.meshgrid(lin, lin)
     x_coords = (X_norm * L).ravel()
     y_coords = (Y_norm * L).ravel()
- 
+
     C_xy = np.full(x_coords.shape[0], Abase, dtype=np.float64)
- 
+
+    # Same fixed per-component base phases (seeded) plus the scene's random phase
+    # offset used by train_model_less_data.py's generate_data.
+    base_phi = np.random.default_rng(phase_seed).uniform(0, 2 * np.pi, size=(2 * m + 1, 2 * n + 1))
+
     for mi in range(-m, m + 1):
         for ni in range(-n, n + 1):
             if mi == 0 and ni == 0:
                 continue
- 
+
             k = np.sqrt(mi**2 + ni**2)
             A_mn = k**(-beta / 2)
-            phi = 1.25
- 
+            phi = base_phi[mi + m, ni + n] + scene_phase
+
             wave_angle = (2 * np.pi * mi * x_coords) / L + (2 * np.pi * ni * y_coords) / L + phi
             C_xy += A_mn * np.cos(wave_angle)
  
@@ -220,17 +224,20 @@ def generate_test_scenes(model, num_scenes, L_min=5, L_max=50, Cth_min=0.30, Cth
     """
     rng = np.random.default_rng(seed)
     scenes = []
- 
+
     for _ in range(num_scenes):
         L = float(rng.uniform(L_min, L_max))
         C_threshold = float(rng.uniform(Cth_min, Cth_max))
- 
-        predicted = generate_cloud_field(model, L, C_threshold, resolution=resolution, device=device)
-        ground_truth = generate_ground_truth_field(L, C_threshold, resolution=resolution)
- 
+        scene_phase = float(rng.uniform(0, 2 * np.pi))
+        phase_norm = scene_phase / (2 * np.pi)
+
+        predicted = generate_cloud_field(model, L, C_threshold, phase_norm, resolution=resolution, device=device)
+        ground_truth = generate_ground_truth_field(L, C_threshold, scene_phase, resolution=resolution)
+
         scenes.append({
             'L': L,
             'C_threshold': C_threshold,
+            'phase': scene_phase,
             'predicted': predicted,
             'ground_truth': ground_truth,
         })

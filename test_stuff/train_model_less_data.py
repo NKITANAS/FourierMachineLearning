@@ -20,7 +20,7 @@ if not params_from_cli:
  
     m, n             = 12, 12
     beta             = 1.67
-    phase_angle      = 1.25       # Can be between 0 and 2*pi
+    phase_seed       = 42         # Seeds the fixed per-wave-component base phases (see below)
     L_min, L_max     = 5, 50
     Cth_min, Cth_max = 0.30, 0.65
     Abase            = 0.7        # Ranges from (0; 1). Higher = Wetter atmosphere.
@@ -30,7 +30,7 @@ if not params_from_cli:
     lr     = 0.001
  
     # Model Params
-    n_inputs = 4
+    n_inputs = 5
     n_outputs = 1
     n_neurons = 35
 else:
@@ -40,19 +40,32 @@ else:
  
 # Generate Data #
  
-def generate_data(samples, scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, phase_angle, Abase):
+def generate_data(samples, scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, phase_seed, Abase):
     # Initialize lists to store the final dataset rows
     X_out = []
     Y_out = []
     L_out = []       # REAL (physical) L, needed later to correctly normalize X/Y
     L_norm_out = []   # normalized L in [0, 1], this is what the model actually sees
     C_norm_out = []   # normalized C_threshold in [0, 1], also a model input feature
+    Phase_norm_out = []  # normalized per-scene phase offset in [0, 1], also a model input feature
     C_xyOUT = []
- 
+
     # Rename bounds for clarity in the math loop: m and n are the maximum limits (M, N)
     M_limit = m
     N_limit = n
- 
+
+    # Give every (mi, ni) wave component its own random phase, exactly like the full
+    # train_model.py does. A single shared `phi` for every component (the earlier
+    # "constant phi for testing" version) collapses the sum into a highly symmetric
+    # pattern that's identical (in normalized x/L, y/L coordinates) for every scene,
+    # so the model has almost nothing spatial to learn and converges to predicting
+    # roughly the mean field everywhere -- i.e. a solid rectangle.
+    # These base phases are seeded once (not redrawn per scene) so scenes stay a
+    # reproducible, learnable function of (x, y, L, C) -- see the per-scene phase
+    # offset below for how scenes still get genuinely different realizations.
+    base_phi = np.random.default_rng(phase_seed).uniform(
+        0, 2 * np.pi, size=(2 * M_limit + 1, 2 * N_limit + 1))
+
     for scene in range(scenes):
         # 1. Define random L and C_threshold for this specific scene
         L = np.random.uniform(L_min, L_max)
@@ -63,22 +76,23 @@ def generate_data(samples, scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, p
         # here rather than being overwritten by L_norm/C_norm — everything below that
         # does physical math (sampling coordinates, computing wave_angle, thresholding)
         # must use the real values. Only L_norm/C_norm get passed to the model as inputs.
- 
+
+        # Random per-scene phase offset, added on top of every component's fixed base
+        # phase below. This is what actually makes each scene a distinct realization
+        # instead of a rescaled copy of the same fixed pattern. It's fed to the model
+        # as its own input (Phase_norm) so the mapping stays learnable despite varying
+        # from scene to scene.
+        scene_phase = np.random.uniform(0, 2 * np.pi)
+        scene_phase_norm = scene_phase / (2 * np.pi)
+
         # 2. Generate random spatial coordinate points within the boundaries of L
         x_coords = np.random.uniform(0, L, size=samples)
         y_coords = np.random.uniform(0, L, size=samples)
- 
+
         # 3. Initialize the cloud density field for all samples with the baseline offset (Abase / a0)
         # We use a numpy array of size (samples,) to compute everything in parallel
         C_xy = np.full(samples, Abase, dtype=float)
- 
-        # Fixed seed here (same value every scene) is a deliberate diagnostic: it forces
-        # every scene to draw the SAME sequence of phases, removing the scene-to-scene
-        # phase ambiguity so (x, y, L, C) -> cloud_density becomes a consistent, learnable
-        # function. Replace with a per-scene / unseeded draw once you want scenes to have
-        # genuinely different realizations again (and give the model the phase info as an
-        # input if you do).
- 
+
         # 4. Evaluate the double summation over the grid of wavenumbers:
         # m runs from -M_limit to +M_limit, n runs from -N_limit to +N_limit
         for mi in range(-M_limit, M_limit + 1):
@@ -86,16 +100,17 @@ def generate_data(samples, scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, p
                 # Skip the DC component (0,0) as it is already covered by Abase
                 if mi == 0 and ni == 0:
                     continue
- 
+
                 # Calculate frequency wave magnitude k
                 k = np.sqrt(mi**2 + ni**2)
- 
+
                 # Calculate amplitude component A_mn
                 A_mn = k**(-beta / 2)
- 
-                # Generate a random phase angle shift unique to this specific wave component
-                phi = phase_angle
- 
+
+                # Each wave component keeps its own (seeded, reproducible) base phase,
+                # shifted by this scene's random phase offset.
+                phi = base_phi[mi + M_limit, ni + N_limit] + scene_phase
+
                 # Compute the spatial wave contribution for all coordinate points simultaneously
                 # Equation: A_mn * cos((2*pi*mi*x)/L + (2*pi*ni*y)/L + phi)
                 # Note: uses the REAL L (domain size) to correctly scale the spatial period.
@@ -121,33 +136,35 @@ def generate_data(samples, scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, p
         L_out.extend([L] * samples)              # real L, for coordinate normalization later
         L_norm_out.extend([L_norm] * samples)      # normalized L, for the model's input feature
         C_norm_out.extend([C_norm] * samples)      # normalized C_threshold, for the model's input feature
+        Phase_norm_out.extend([scene_phase_norm] * samples)  # normalized phase, for the model's input feature
         C_xyOUT.extend(cloud_density.tolist())
- 
+
     # Return the flat lists ready to be loaded into your dataset object
-    return X_out, Y_out, L_out, L_norm_out, C_norm_out, C_xyOUT
+    return X_out, Y_out, L_out, L_norm_out, C_norm_out, Phase_norm_out, C_xyOUT
  
  
 # Create Dataset #
  
 class FourierDataset(dataset.Dataset):
-    def __init__(self, X, Y, L, L_norm, C_norm, C_xy):
+    def __init__(self, X, Y, L, L_norm, C_norm, Phase_norm, C_xy):
         # Convert lists to numpy arrays
         X = np.array(X, dtype=np.float32)
         Y = np.array(Y, dtype=np.float32)
         L = np.array(L, dtype=np.float32)             # REAL L, used only to normalize X/Y below
         L_norm = np.array(L_norm, dtype=np.float32)    # normalized L, goes into the model input
         C_norm = np.array(C_norm, dtype=np.float32)    # normalized C_threshold, goes into the model input
- 
+        Phase_norm = np.array(Phase_norm, dtype=np.float32)  # normalized scene phase, goes into the model input
+
         # 1. Coordinate Normalization (Crucial!)
         # Scale X and Y relative to their specific scene's REAL L.
         # Now (X_norm, Y_norm) are always strictly bounded between 0 and 1.
         X_norm = X / L
         Y_norm = Y / L
- 
-        # 2. Stack inputs: [X_norm, Y_norm, L_norm, C_norm]
-        # All four features are now consistently scaled to comparable ranges,
+
+        # 2. Stack inputs: [X_norm, Y_norm, L_norm, C_norm, Phase_norm]
+        # All five features are now consistently scaled to comparable ranges,
         # which is what the model actually needs to see.
-        inputs = np.stack([X_norm, Y_norm, L_norm, C_norm], axis=1)
+        inputs = np.stack([X_norm, Y_norm, L_norm, C_norm, Phase_norm], axis=1)
  
         # Convert to tensors directly in RAM
         self.inputs = torch.tensor(inputs, dtype=torch.float32)
@@ -225,13 +242,13 @@ def train_one_epoch(training_loader, model, optimizer, loss_function):
  
 def main():
     # Create the data
-    Xtrain, Ytrain, Ltrain, Ltrain_norm, Ctrain_norm, C_xytrain = generate_data(
-        samples, scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, phase_angle, Abase)
-    Xtest, Ytest, Ltest, Ltest_norm, Ctest_norm, C_xytest = generate_data(
-        test_samples, test_scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, phase_angle, Abase)
- 
-    training_data = FourierDataset(Xtrain, Ytrain, Ltrain, Ltrain_norm, Ctrain_norm, C_xytrain)
-    test_data = FourierDataset(Xtest, Ytest, Ltest, Ltest_norm, Ctest_norm, C_xytest)
+    Xtrain, Ytrain, Ltrain, Ltrain_norm, Ctrain_norm, Phasetrain_norm, C_xytrain = generate_data(
+        samples, scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, phase_seed, Abase)
+    Xtest, Ytest, Ltest, Ltest_norm, Ctest_norm, Phasetest_norm, C_xytest = generate_data(
+        test_samples, test_scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, phase_seed, Abase)
+
+    training_data = FourierDataset(Xtrain, Ytrain, Ltrain, Ltrain_norm, Ctrain_norm, Phasetrain_norm, C_xytrain)
+    test_data = FourierDataset(Xtest, Ytest, Ltest, Ltest_norm, Ctest_norm, Phasetest_norm, C_xytest)
  
     training_loader = torch.utils.data.DataLoader(training_data, batch_size=batch_size, shuffle=True)
     testing_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size, shuffle=True)
