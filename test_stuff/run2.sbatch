@@ -3,31 +3,38 @@
 #SBATCH -J fourier_series_ai
 #SBATCH -o %x-%j.out
 #SBATCH -e %x-%j.err
-#SBATCH -t 1:00:00
+#SBATCH -t 2:00:00
 #SBATCH -p batch
 #SBATCH -N 1
+#SBATCH --gpus-per-node=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=7
 
 set -euo pipefail
-
 echo "Job start: $(date)"
 
-# Load required modules if the `module` command is available
-#if command -v module >/dev/null 2>&1; then
-#	module load PrgEnv-gnu/8.7.0
-#	module load cpe/26.03
-#	module load miniforge3/23.11.0-0
-#	module load rocm/7.1.1
-#	module load craype-accel-amd-gfx90a
-#fi
+# Load required modules
+if command -v module >/dev/null 2>&1; then
+	module load PrgEnv-gnu/8.7.0
+	module load cpe/26.03
+	module load miniforge3/23.11.0-0
+	module load rocm/7.1.1
+	module load craype-accel-amd-gfx90a
+fi
 
-# Limit threading for BLAS/OpenMP libraries
-export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
-export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-1}
+# Threading for BLAS/OpenMP libraries — match cpus-per-task above rather
+# than forcing single-threaded, since data generation is CPU-bound NumPy work.
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-$SLURM_CPUS_PER_TASK}
+export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-$SLURM_CPUS_PER_TASK}
 
 # Because using a non-default CPE
 if [ -n "${CRAY_LD_LIBRARY_PATH:-}" ]; then
 	export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH}:$LD_LIBRARY_PATH"
 fi
+
+# Make sure the allocated GPU is actually visible to ROCm/PyTorch
+export ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-$SLURM_LOCALID}
+export HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-$SLURM_LOCALID}
 
 # Create a MIOPEN cache directory in /tmp (unique per job)
 MIOPEN_USER_DB_PATH=${MIOPEN_USER_DB_PATH:-"/tmp/my-miopen-cache-$SLURM_JOB_ID"}
@@ -52,12 +59,12 @@ else
 fi
 
 # Allow overriding which script to run: pass as first arg or set SCRIPT env var.
-SCRIPT=${1:-${SCRIPT:-train_model.py}}
-
+SCRIPT=${1:-${SCRIPT:-test_stuff/train_model_less_data.py}}
 echo "Running with Python: $(python -V 2>&1)"
 echo "Executing script: $SCRIPT"
+echo "GPUs visible to job: $(rocm-smi --showid 2>/dev/null || echo 'rocm-smi not available')"
 
-# Run Python script (unbuffered)
-python -u "$SCRIPT"
+# Run through srun so the task is properly bound to its allocated GPU/CPUs
+srun --gpus-per-task=1 --cpus-per-task=$SLURM_CPUS_PER_TASK python -u "$SCRIPT"
 
 echo "Job end: $(date)"
