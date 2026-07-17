@@ -3,10 +3,10 @@
 #SBATCH -J fourier_series_ai
 #SBATCH -o %x-%j.out
 #SBATCH -e %x-%j.err
-#SBATCH -t 2:00:00
+#SBATCH -t 10:00:00
 #SBATCH -p batch
 #SBATCH -N 1
-#SBATCH --gpus-per-node=1
+#SBATCH --gpus-per-node=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=7
 

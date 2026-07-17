@@ -12,11 +12,11 @@ params_from_cli = False
  
 if not params_from_cli:
     # Data Generation and Processing
-    samples = 10000
-    scenes  = 200
+    samples = 1000
+    scenes  = 1000
     test_scenes = 20
-    test_samples = 100
-    batch_size = 50
+    test_samples = 10000
+    batch_size = 100
  
     m, n             = 12, 12
     beta             = 1.67
@@ -26,7 +26,7 @@ if not params_from_cli:
     Abase            = 0.7        # Ranges from (0; 1). Higher = Wetter atmosphere.
  
     # Training Params
-    epochs = 20
+    epochs = 2000
     lr     = 0.001
  
     # Model Params
