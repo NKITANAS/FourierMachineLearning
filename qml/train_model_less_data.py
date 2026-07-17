@@ -15,7 +15,7 @@ params_from_cli = False
 if not params_from_cli:
     # Data Generation and Processing
     samples = 1000
-    scenes  = 1000
+    scenes  = 500
     test_scenes = 20
     test_samples = 10000
     batch_size = 100
@@ -28,7 +28,7 @@ if not params_from_cli:
     Abase            = 0.7        # Ranges from (0; 1). Higher = Wetter atmosphere.
 
     # Training Params
-    epochs = 2000
+    epochs = 500
     lr     = 0.001
 
     # Model Params
@@ -317,7 +317,7 @@ def main():
         # Track best performance, and save the model's state
         if avg_vloss < best_vloss:
             best_vloss = avg_vloss
-            model_path = f'model_1_{epoch_number}.pt'
+            model_path = f'models/qml/model_1_{epoch_number}.pt'
             torch.save(model.state_dict(), model_path)
 
         epoch_number += 1
@@ -325,7 +325,7 @@ def main():
     # Always save the model's state once training completes, regardless of whether
     # the final epoch happened to be the best one. Without this, if the last epoch
     # isn't an improvement over best_vloss, its weights are never written to disk.
-    final_model_path = 'model_1_final.pt'
+    final_model_path = 'model_1_final_qml.pt'
     torch.save(model.state_dict(), final_model_path)
     print(f'Training complete. Final model saved to {final_model_path}')
 

@@ -12,10 +12,10 @@ params_from_cli = False
  
 if not params_from_cli:
     # Data Generation and Processing
-    samples = 1000
+    samples = 10000
     scenes  = 1000
-    test_scenes = 20
-    test_samples = 10000
+    test_scenes = 200
+    test_samples = 1000
     batch_size = 100
  
     m, n             = 12, 12
@@ -175,7 +175,16 @@ class FourierDataset(dataset.Dataset):
  
     def __getitem__(self, idx):
         return self.inputs[idx], self.out[idx]
- 
+        # ADD THIS NEW METHOD HERE 
+    def to(self, device):
+        self.X = self.X.to(device)
+        self.Y = self.Y.to(device)
+        self.L = self.L.to(device)
+        self.L_norm = self.L_norm.to(device)
+        self.C_norm = self.C_norm.to(device)
+        self.Phase_norm = self.Phase_norm.to(device)
+        self.C_xy = self.C_xy.to(device)
+        return self # Allows chaining like dataset.to(device) 
  
  
  
@@ -242,17 +251,23 @@ def train_one_epoch(training_loader, model, optimizer, loss_function):
  
 def main():
     # Create the data
+    # 1. Setup device target
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 2. Create the data normally (Leave them as standard lists/arrays)
     Xtrain, Ytrain, Ltrain, Ltrain_norm, Ctrain_norm, Phasetrain_norm, C_xytrain = generate_data(
         samples, scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, phase_seed, Abase)
     Xtest, Ytest, Ltest, Ltest_norm, Ctest_norm, Phasetest_norm, C_xytest = generate_data(
         test_samples, test_scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, phase_seed, Abase)
 
+    # 3. Build datasets on CPU, then call your clean custom .to(device) method!
     training_data = FourierDataset(Xtrain, Ytrain, Ltrain, Ltrain_norm, Ctrain_norm, Phasetrain_norm, C_xytrain)
     test_data = FourierDataset(Xtest, Ytest, Ltest, Ltest_norm, Ctest_norm, Phasetest_norm, C_xytest)
- 
-    training_loader = torch.utils.data.DataLoader(training_data, batch_size=batch_size, shuffle=True)
-    testing_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size, shuffle=True)
- 
+
+    # 4. Data Loaders (Keep num_workers=0 since data is permanently residing on GPU VRAM)
+    training_loader = torch.utils.data.DataLoader(training_data, batch_size=batch_size, shuffle=True, pin_memory=True)
+    testing_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size, shuffle=False, pin_memory=True)
+
     # Build model, loss, optimizer
     model = FourierModel()
     loss_function = torch.nn.BCELoss()
@@ -287,7 +302,7 @@ def main():
         # Track best performance, and save the model's state
         if avg_vloss < best_vloss:
             best_vloss = avg_vloss
-            model_path = f'model_1_{epoch_number}.pt'
+            model_path = f'models/cml/model_1_{epoch_number}.pt'
             torch.save(model.state_dict(), model_path)
  
         epoch_number += 1
@@ -295,7 +310,7 @@ def main():
     # Always save the model's state once training completes, regardless of whether
     # the final epoch happened to be the best one. Without this, if the last epoch
     # isn't an improvement over best_vloss, its weights are never written to disk.
-    final_model_path = 'model_1_final.pt'
+    final_model_path = 'model_1_final_cml.pt'
     torch.save(model.state_dict(), final_model_path)
     print(f'Training complete. Final model saved to {final_model_path}')
  
