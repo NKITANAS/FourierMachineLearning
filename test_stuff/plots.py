@@ -324,8 +324,8 @@ def compute_dataset_metrics(model, data_loader, loss_function=None, device='cpu'
  
  
 def main():
-    checkpoint_dir = '.'
-    checkpoint_path = find_latest_checkpoint()
+    checkpoint_dir = './models/cml/'
+    checkpoint_path = find_latest_checkpoint(directory=checkpoint_dir)
  
     if checkpoint_path is None:
         print("No checkpoint found matching 'model_1_*.pt' in", checkpoint_dir)
