@@ -1,7 +1,9 @@
 # Imports #
+import os
+
 import numpy as np
 import matplotlib.pyplot as plt
- 
+
 import torch
 from torch.utils.data import dataset, dataloader
  
@@ -41,15 +43,6 @@ else:
 # Generate Data #
  
 def generate_data(samples, scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, phase_seed, Abase):
-    # Initialize lists to store the final dataset rows
-    X_out = []
-    Y_out = []
-    L_out = []       # REAL (physical) L, needed later to correctly normalize X/Y
-    L_norm_out = []   # normalized L in [0, 1], this is what the model actually sees
-    C_norm_out = []   # normalized C_threshold in [0, 1], also a model input feature
-    Phase_norm_out = []  # normalized per-scene phase offset in [0, 1], also a model input feature
-    C_xyOUT = []
-
     # Rename bounds for clarity in the math loop: m and n are the maximum limits (M, N)
     M_limit = m
     N_limit = n
@@ -65,6 +58,27 @@ def generate_data(samples, scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, p
     # offset below for how scenes still get genuinely different realizations.
     base_phi = np.random.default_rng(phase_seed).uniform(
         0, 2 * np.pi, size=(2 * M_limit + 1, 2 * N_limit + 1))
+
+    # Precompute the (mi, ni) wave-component grid once -- it's identical for every
+    # scene. Flattening it lets the double loop over components below collapse into
+    # a single vectorized (component x sample) broadcast per scene instead of up to
+    # (2*M_limit+1)*(2*N_limit+1) separate Python iterations, each doing its own
+    # array op over `samples` points. That nested-loop version was the dominant cost
+    # of data generation (thousands of Python-level iterations per scene).
+    mi_range = np.arange(-M_limit, M_limit + 1)
+    ni_range = np.arange(-N_limit, N_limit + 1)
+    MI, NI = np.meshgrid(mi_range, ni_range, indexing='ij')
+    component_mask = ~((MI == 0) & (NI == 0))  # drop the DC component (covered by Abase)
+    mi_flat = MI[component_mask].astype(np.float64)
+    ni_flat = NI[component_mask].astype(np.float64)
+    k_flat = np.sqrt(mi_flat**2 + ni_flat**2)
+    A_flat = k_flat ** (-beta / 2)
+    base_phi_flat = base_phi[component_mask]
+
+    X_chunks, Y_chunks = [], []
+    L_chunks, L_norm_chunks = [], []       # REAL L / normalized L
+    C_norm_chunks, Phase_norm_chunks = [], []
+    C_xy_chunks = []
 
     for scene in range(scenes):
         # 1. Define random L and C_threshold for this specific scene
@@ -89,58 +103,47 @@ def generate_data(samples, scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, p
         x_coords = np.random.uniform(0, L, size=samples)
         y_coords = np.random.uniform(0, L, size=samples)
 
-        # 3. Initialize the cloud density field for all samples with the baseline offset (Abase / a0)
-        # We use a numpy array of size (samples,) to compute everything in parallel
-        C_xy = np.full(samples, Abase, dtype=float)
+        # 3-4. Evaluate the double summation over the grid of wavenumbers for every
+        # sample at once. Equation per component: A_mn * cos((2*pi*mi*x)/L + (2*pi*ni*y)/L + phi)
+        # wave_angle has shape (n_components, samples); summing over axis 0 performs
+        # the same accumulation the nested Python loop used to do, but in one
+        # vectorized (BLAS-backed) pass instead of thousands of tiny ones.
+        phi = base_phi_flat + scene_phase
+        wave_angle = (2 * np.pi / L) * (
+            mi_flat[:, None] * x_coords[None, :] + ni_flat[:, None] * y_coords[None, :]
+        ) + phi[:, None]
+        C_xy = Abase + (A_flat[:, None] * np.cos(wave_angle)).sum(axis=0)
 
-        # 4. Evaluate the double summation over the grid of wavenumbers:
-        # m runs from -M_limit to +M_limit, n runs from -N_limit to +N_limit
-        for mi in range(-M_limit, M_limit + 1):
-            for ni in range(-N_limit, N_limit + 1):
-                # Skip the DC component (0,0) as it is already covered by Abase
-                if mi == 0 and ni == 0:
-                    continue
-
-                # Calculate frequency wave magnitude k
-                k = np.sqrt(mi**2 + ni**2)
-
-                # Calculate amplitude component A_mn
-                A_mn = k**(-beta / 2)
-
-                # Each wave component keeps its own (seeded, reproducible) base phase,
-                # shifted by this scene's random phase offset.
-                phi = base_phi[mi + M_limit, ni + N_limit] + scene_phase
-
-                # Compute the spatial wave contribution for all coordinate points simultaneously
-                # Equation: A_mn * cos((2*pi*mi*x)/L + (2*pi*ni*y)/L + phi)
-                # Note: uses the REAL L (domain size) to correctly scale the spatial period.
-                wave_angle = (2 * np.pi * mi * x_coords) / L + (2 * np.pi * ni * y_coords) / L + phi
-                C_xy += A_mn * np.cos(wave_angle)
- 
         # 5. Normalize this scene's raw field to a clean [0, 1] range
         c_min, c_max = C_xy.min(), C_xy.max()
         if c_max != c_min:
             relative_humidity = (C_xy - c_min) / (c_max - c_min)
         else:
             relative_humidity = np.zeros_like(C_xy)
- 
+
         # 6. Apply condensation threshold rules (uses the REAL C_threshold, not C_norm)
         # Density is 0 if it doesn't cross C_threshold. If it does, we scale the remainder.
         cloud_density = np.clip(relative_humidity - C_threshold, 0, None)
         if cloud_density.max() > 0:
             cloud_density = cloud_density / cloud_density.max()
- 
-        # 7. Append the calculated coordinates and outputs to our global lists
-        X_out.extend(x_coords.tolist())
-        Y_out.extend(y_coords.tolist())
-        L_out.extend([L] * samples)              # real L, for coordinate normalization later
-        L_norm_out.extend([L_norm] * samples)      # normalized L, for the model's input feature
-        C_norm_out.extend([C_norm] * samples)      # normalized C_threshold, for the model's input feature
-        Phase_norm_out.extend([scene_phase_norm] * samples)  # normalized phase, for the model's input feature
-        C_xyOUT.extend(cloud_density.tolist())
 
-    # Return the flat lists ready to be loaded into your dataset object
-    return X_out, Y_out, L_out, L_norm_out, C_norm_out, Phase_norm_out, C_xyOUT
+        # 7. Collect this scene's arrays; concatenated once at the end instead of
+        # growing Python lists element-by-element (avoids boxing every float and the
+        # final list->ndarray conversion cost over millions of rows).
+        X_chunks.append(x_coords)
+        Y_chunks.append(y_coords)
+        L_chunks.append(np.full(samples, L))
+        L_norm_chunks.append(np.full(samples, L_norm))
+        C_norm_chunks.append(np.full(samples, C_norm))
+        Phase_norm_chunks.append(np.full(samples, scene_phase_norm))
+        C_xy_chunks.append(cloud_density)
+
+    return (
+        np.concatenate(X_chunks), np.concatenate(Y_chunks),
+        np.concatenate(L_chunks), np.concatenate(L_norm_chunks),
+        np.concatenate(C_norm_chunks), np.concatenate(Phase_norm_chunks),
+        np.concatenate(C_xy_chunks),
+    )
  
  
 # Create Dataset #
@@ -217,35 +220,42 @@ class FourierModel(torch.nn.Module):
         return self.network(x)
  
  
-def train_one_epoch(training_loader, model, optimizer, loss_function):
+def train_one_epoch(inputs, targets, batch_size, model, optimizer, loss_function):
     running_loss = 0.0
     last_loss = 0.0
- 
-    # index and do some intra-epoch reporting
-    for i, data in enumerate(training_loader):
-        # Every data instance is an input + label pair
-        inputs, labels = data
- 
+
+    # Shuffle once per epoch via a GPU-resident permutation, then slice batches
+    # directly out of the tensors already sitting in VRAM. This replaces the
+    # DataLoader (which paid Python-level __getitem__/collate overhead per sample,
+    # plus a host->device copy per batch) with plain tensor indexing -- the same
+    # shuffled-minibatch SGD, just without the per-batch interpreter overhead.
+    perm = torch.randperm(inputs.shape[0], device=inputs.device)
+
+    for i, start in enumerate(range(0, inputs.shape[0], batch_size)):
+        idx = perm[start:start + batch_size]
+        batch_inputs = inputs[idx]
+        batch_labels = targets[idx]
+
         # Zero your gradients for every batch!
         optimizer.zero_grad()
- 
+
         # Make predictions for this batch
-        outputs = model(inputs)
- 
+        outputs = model(batch_inputs)
+
         # Compute the loss and its gradients
-        loss = loss_function(outputs, labels)
+        loss = loss_function(outputs, batch_labels)
         loss.backward()
- 
+
         # Adjust learning weights
         optimizer.step()
- 
+
         # Gather data and report
         running_loss += loss.item()
         if i % 1000 == 999:
             last_loss = running_loss / 1000.0  # loss per batch
             print(f'  batch {i + 1} loss: {last_loss}')
             running_loss = 0.0
- 
+
     return last_loss
  
  
@@ -253,6 +263,7 @@ def main():
     # Create the data
     # 1. Setup device target
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f'Using device: {device}')
 
     # 2. Create the data normally (Leave them as standard lists/arrays)
     Xtrain, Ytrain, Ltrain, Ltrain_norm, Ctrain_norm, Phasetrain_norm, C_xytrain = generate_data(
@@ -260,51 +271,62 @@ def main():
     Xtest, Ytest, Ltest, Ltest_norm, Ctest_norm, Phasetest_norm, C_xytest = generate_data(
         test_samples, test_scenes, m, n, beta, L_min, L_max, Cth_min, Cth_max, phase_seed, Abase)
 
-    # 3. Build datasets on CPU, then call your clean custom .to(device) method!
+    # 3. Build datasets on CPU...
     training_data = FourierDataset(Xtrain, Ytrain, Ltrain, Ltrain_norm, Ctrain_norm, Phasetrain_norm, C_xytrain)
     test_data = FourierDataset(Xtest, Ytest, Ltest, Ltest_norm, Ctest_norm, Phasetest_norm, C_xytest)
 
-    # 4. Data Loaders (Keep num_workers=0 since data is permanently residing on GPU VRAM)
-    training_loader = torch.utils.data.DataLoader(training_data, batch_size=batch_size, shuffle=True, pin_memory=True)
-    testing_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size, shuffle=False, pin_memory=True)
+    # 4. ...then move the whole dataset onto the GPU once, up front. Everything fits
+    # comfortably in VRAM, so there's no need to shuttle individual batches over from
+    # host memory on every step via a DataLoader -- that was the previous (unused)
+    # intent of pin_memory=True, except the tensors were never actually placed on
+    # `device` before, so training silently ran on CPU regardless of GPU availability.
+    train_inputs = training_data.inputs.to(device)
+    train_targets = training_data.out.to(device)
+    test_inputs = test_data.inputs.to(device)
+    test_targets = test_data.out.to(device)
 
     # Build model, loss, optimizer
-    model = FourierModel()
+    model = FourierModel().to(device)
     loss_function = torch.nn.BCELoss()
     optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
- 
+
+    os.makedirs('models/cml', exist_ok=True)
+
     epoch_number = 0
     best_vloss = float('inf')
- 
+
     for epoch in range(epochs):
         print(f'EPOCH {epoch_number + 1}:')
- 
+
         # Make sure gradient tracking is on, and do a pass over the data
         model.train()
-        avg_loss = train_one_epoch(training_loader, model, optimizer, loss_function)
- 
+        avg_loss = train_one_epoch(train_inputs, train_targets, batch_size, model, optimizer, loss_function)
+
         running_vloss = 0.0
+        n_vbatches = 0
         # Set the model to evaluation mode, disabling dropout and using population
         # statistics for batch normalization.
         model.eval()
- 
+
         # Disable gradient computation and reduce memory consumption.
         with torch.no_grad():
-            for i, vdata in enumerate(testing_loader):
-                vinputs, vlabels = vdata
+            for start in range(0, test_inputs.shape[0], batch_size):
+                vinputs = test_inputs[start:start + batch_size]
+                vlabels = test_targets[start:start + batch_size]
                 voutputs = model(vinputs)
                 vloss = loss_function(voutputs, vlabels)
                 running_vloss += vloss.item()
- 
-        avg_vloss = running_vloss / (i + 1)
+                n_vbatches += 1
+
+        avg_vloss = running_vloss / n_vbatches
         print(f'LOSS train {avg_loss} valid {avg_vloss}')
- 
+
         # Track best performance, and save the model's state
         if avg_vloss < best_vloss:
             best_vloss = avg_vloss
             model_path = f'models/cml/model_1_{epoch_number}.pt'
             torch.save(model.state_dict(), model_path)
- 
+
         epoch_number += 1
  
     # Always save the model's state once training completes, regardless of whether
