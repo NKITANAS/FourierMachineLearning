@@ -238,6 +238,7 @@ class FourierModel(torch.nn.Module):
 
     def forward(self, x):
         q_out = self.qlayer(x)
+        print(q_out)
         return self.head(q_out)
 
 
