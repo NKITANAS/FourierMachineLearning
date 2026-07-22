@@ -2,7 +2,7 @@ import os
 import re
 import matplotlib.pyplot as plt
 
-file_path = "fourier_series_ai_fourier_series_ai-42301.out"
+file_path = "fourier_series_ai-42301.out"
 
 if not os.path.exists(file_path):
     raise FileNotFoundError(file_path)

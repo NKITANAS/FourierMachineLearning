@@ -20,7 +20,7 @@ if not params_from_cli:
     scenes  = 500
     test_scenes = 20
     test_samples = 10000
-    batch_size = 100
+    batch_size = 500
 
     m, n             = 12, 12
     beta             = 1.67
@@ -31,7 +31,7 @@ if not params_from_cli:
 
     # Training Params
     epochs = 500
-    lr     = 0.001
+    lr     = 0.01
 
     # Model Params
     n_inputs = 5

@@ -324,8 +324,8 @@ def compute_dataset_metrics(model, data_loader, loss_function=None, device='cpu'
  
  
 def main():
-    checkpoint_dir = './models/cml/'
-    checkpoint_path = find_latest_checkpoint(directory=checkpoint_dir)
+    checkpoint_dir = './model_1_final_cml.pt'
+    checkpoint_path = checkpoint_dir
  
     if checkpoint_path is None:
         print("No checkpoint found matching 'model_1_*.pt' in", checkpoint_dir)
@@ -351,7 +351,7 @@ def main():
         true_field = scene['ground_truth']['cloud_density']
         diff_field = predicted_field - true_field
  
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
  
         im0 = axes[0].imshow(predicted_field, origin='lower', cmap='Blues', vmin=0, vmax=1)
         axes[0].set_title('Predicted')
@@ -362,9 +362,9 @@ def main():
         fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
  
         max_abs_diff = np.max(np.abs(diff_field)) if np.max(np.abs(diff_field)) > 0 else 1.0
-        im2 = axes[2].imshow(diff_field, origin='lower', cmap='RdBu_r', vmin=-max_abs_diff, vmax=max_abs_diff)
-        axes[2].set_title('Difference (Pred - True)')
-        fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+        #im2 = axes[2].imshow(diff_field, origin='lower', cmap='RdBu_r', vmin=-max_abs_diff, vmax=max_abs_diff)
+        #axes[2].set_title('Difference (Pred - True)')
+        #fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
  
         fig.suptitle(f"L={scene['L']:.0f}, C_threshold={scene['C_threshold']:.3f} | "
                      f"MSE={metrics['mse']:.5f}, MAE={metrics['mae']:.5f}, corr={metrics['correlation']:.3f}")
