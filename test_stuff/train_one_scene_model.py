@@ -240,6 +240,8 @@ def main():
 
     epoch_number = 0
     best_vloss = float('inf')
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Trainable parameters: {trainable_params:,}")
 
     for epoch in range(epochs):
         print(f'EPOCH {epoch_number + 1}:')

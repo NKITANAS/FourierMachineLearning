@@ -16,8 +16,8 @@ params_from_cli = False
 
 if not params_from_cli:
     # Data Generation and Processing
-    samples = 2000          # training points sampled from the one fixed scene
-    test_samples = 500       # held-out points sampled from that same scene
+    samples = 20000          # training points sampled from the one fixed scene
+    test_samples = 5000       # held-out points sampled from that same scene
     batch_size = 500
 
     m, n             = 12, 12
