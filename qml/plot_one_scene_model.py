@@ -22,7 +22,7 @@ n_neurons = 35
 
 # QML Params (must match train_one_scene_model.py)
 n_qubits = n_inputs
-n_qlayers = 3
+n_qlayers = 16  # depth of the variational circuit AND number of data re-uploads
 
 # Data-generation hyperparameters (used for ground-truth comparison fields)
 m, n = 12, 12
@@ -48,8 +48,11 @@ _qdevice = qml.device("default.qubit", wires=n_qubits)
 
 @qml.qnode(_qdevice, interface="torch", diff_method="backprop")
 def _quantum_circuit(inputs, weights):
-    qml.AngleEmbedding(inputs * np.pi, wires=range(n_qubits), rotation='Y')
-    qml.StronglyEntanglingLayers(weights, wires=range(n_qubits))
+    # Data re-uploading -- must match train_one_scene_model.py's circuit exactly,
+    # since checkpoint weight shapes and semantics depend on it.
+    for l in range(n_qlayers):
+        qml.AngleEmbedding(inputs * np.pi, wires=range(n_qubits), rotation='Y')
+        qml.StronglyEntanglingLayers(weights[l:l + 1], wires=range(n_qubits))
     return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
 

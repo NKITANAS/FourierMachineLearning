@@ -293,7 +293,8 @@ def main():
 
     # Batch by indexing the in-memory tensors directly (see train_one_epoch) instead
     # of going through a DataLoader. NOTE: no device transfer here -- default.qubit's
-    # circuit simulation has no AMD/ROCm-accelerated backend (PennyLane's GPU
+    # circ
+    # uit simulation has no AMD/ROCm-accelerated backend (PennyLane's GPU
     # simulators, e.g. lightning.gpu, are NVIDIA/cuQuantum-only), so the quantum layer
     # runs on CPU regardless; moving just the tiny classical head to the GPU would add
     # host<->device round-trips for no benefit.
@@ -320,7 +321,8 @@ def main():
         running_vloss = 0.0
         n_vbatches = 0
         # Set the model to evaluation mode, disabling dropout and using population
-        # statistics for batch normalization.
+        # statistics for b
+        # atch normalization.
         model.eval()
 
         # Disable gradient computation and reduce memory consumption.

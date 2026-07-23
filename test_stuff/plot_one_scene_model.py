@@ -14,7 +14,8 @@ import matplotlib.pyplot as plt
 # standalone without depending on the training script's module path.
 # =====================================================================================
 
-n_inputs = 2
+n_freqs = 12  # must match n_freqs in train_one_scene_model.py
+n_inputs = 2 + 4 * n_freqs
 n_outputs = 1
 n_neurons = 35
 
@@ -96,14 +97,30 @@ def load_model(model_path, device='cpu'):
 # Model-driven field generation
 # =====================================================================================
 
+def fourier_feature_map(X_norm, Y_norm, n_freqs):
+    """
+    Same encoding as train_one_scene_model.py's FourierDataset: [x, y,
+    sin(2*pi*k*x), cos(2*pi*k*x), sin(2*pi*k*y), cos(2*pi*k*y)] for k in 1..n_freqs.
+    Must stay in sync with the training script's feature map or checkpoints will
+    load fine but silently predict garbage (wrong input semantics).
+    """
+    freqs = np.arange(1, n_freqs + 1, dtype=np.float32)
+    x_ang = 2 * np.pi * X_norm[:, None] * freqs[None, :]
+    y_ang = 2 * np.pi * Y_norm[:, None] * freqs[None, :]
+    return np.concatenate([
+        X_norm[:, None], Y_norm[:, None],
+        np.sin(x_ang), np.cos(x_ang), np.sin(y_ang), np.cos(y_ang),
+    ], axis=1)
+
+
 def generate_grid_inputs(L, resolution=200):
     """
     Build a (resolution x resolution) grid of normalized (x, y) coordinates in [0, 1],
-    ready to feed straight into the model -- since the scene is fixed, (x, y) are the
-    only two features it needs.
+    Fourier-feature encoded (see fourier_feature_map) so it matches exactly what the
+    model was trained on.
 
     Returns:
-        inputs_tensor: (resolution*resolution, 2) float32 tensor, ready for the model
+        inputs_tensor: (resolution*resolution, n_inputs) float32 tensor, ready for the model
         X_norm, Y_norm: (resolution, resolution) meshgrid arrays (normalized coords),
                          kept around so outputs can be reshaped/plotted later
     """
@@ -113,7 +130,7 @@ def generate_grid_inputs(L, resolution=200):
     flat_x = X_norm.ravel()
     flat_y = Y_norm.ravel()
 
-    inputs = np.stack([flat_x, flat_y], axis=1)
+    inputs = fourier_feature_map(flat_x, flat_y, n_freqs)
     inputs_tensor = torch.tensor(inputs, dtype=torch.float32)
 
     return inputs_tensor, X_norm, Y_norm
